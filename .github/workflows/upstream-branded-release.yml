@@ -1,0 +1,132 @@
+name: Build Branded APK From Upstream
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 */6 * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: branded-upstream-release
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: 2dust/v2rayNG
+
+jobs:
+  build-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout fork config
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Preserve fork customization
+        run: |
+          mkdir -p /tmp/fork-custom
+          cp -R branding /tmp/fork-custom/branding
+          cp -R scripts /tmp/fork-custom/scripts
+
+      - name: Resolve latest upstream commit
+        id: upstream
+        run: |
+          upstream_sha="$(git ls-remote "https://github.com/${UPSTREAM_REPO}.git" refs/heads/master | awk '{print $1}')"
+          if [ -z "$upstream_sha" ]; then
+            echo "failed to resolve upstream master sha" >&2
+            exit 1
+          fi
+          short_sha="${upstream_sha:0:12}"
+          release_tag="upstream-${short_sha}"
+          echo "sha=$upstream_sha" >> "$GITHUB_OUTPUT"
+          echo "short_sha=$short_sha" >> "$GITHUB_OUTPUT"
+          echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
+
+      - name: Skip if this upstream commit is already released
+        id: release_check
+        run: |
+          if git ls-remote --exit-code --tags origin "refs/tags/${{ steps.upstream.outputs.release_tag }}" >/dev/null 2>&1; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Stop early when no upstream update exists
+        if: steps.release_check.outputs.skip == 'true'
+        run: |
+          echo "Release ${{ steps.upstream.outputs.release_tag }} already exists. Skipping."
+
+      - name: Checkout upstream source
+        if: steps.release_check.outputs.skip != 'true'
+        run: |
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
+          git fetch --depth=1 upstream master
+          git checkout --detach FETCH_HEAD
+          cp -R /tmp/fork-custom/branding ./branding
+          cp -R /tmp/fork-custom/scripts ./scripts
+
+      - name: Set up JDK 17
+        if: steps.release_check.outputs.skip != 'true'
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Apply branding
+        if: steps.release_check.outputs.skip != 'true'
+        env:
+          BRAND_APPLICATION_ID: ${{ vars.BRAND_APPLICATION_ID }}
+          BRAND_APP_NAME: ${{ vars.BRAND_APP_NAME }}
+          BRAND_ARTIFACT_PREFIX: ${{ vars.BRAND_ARTIFACT_PREFIX }}
+          BRAND_GITHUB_REPO: ${{ vars.BRAND_GITHUB_REPO }}
+          BRAND_URL_SCHEME: ${{ vars.BRAND_URL_SCHEME }}
+        run: |
+          chmod +x scripts/apply-branding.sh
+          scripts/apply-branding.sh
+
+      - name: Build playstore release APK
+        if: steps.release_check.outputs.skip != 'true'
+        working-directory: V2rayNG
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon assemblePlaystoreRelease
+
+      - name: Collect release files
+        if: steps.release_check.outputs.skip != 'true'
+        id: release_meta
+        env:
+          BRAND_APPLICATION_ID: ${{ vars.BRAND_APPLICATION_ID }}
+          BRAND_APP_NAME: ${{ vars.BRAND_APP_NAME }}
+        run: |
+          mkdir -p dist
+          find V2rayNG/app/build/outputs/apk/playstore/release -name "*.apk" -type f -exec cp {} dist/ \;
+          if ! ls dist/*.apk >/dev/null 2>&1; then
+            echo "no apk files were produced" >&2
+            exit 1
+          fi
+          version_name="$(sed -n 's/.*versionName = "\(.*\)"/\1/p' V2rayNG/app/build.gradle.kts | head -1)"
+          release_name="Branded v2rayNG ${version_name} (${{ steps.upstream.outputs.short_sha }})"
+          notes_file="dist/release-notes.txt"
+          {
+            echo "Upstream repository: https://github.com/${UPSTREAM_REPO}"
+            echo "Upstream commit: ${{ steps.upstream.outputs.sha }}"
+            echo "Brand applicationId: ${BRAND_APPLICATION_ID:-unset}"
+            echo "Brand app name: ${BRAND_APP_NAME:-unset}"
+          } > "$notes_file"
+          echo "version_name=$version_name" >> "$GITHUB_OUTPUT"
+          echo "release_name=$release_name" >> "$GITHUB_OUTPUT"
+          echo "notes_file=$notes_file" >> "$GITHUB_OUTPUT"
+
+      - name: Publish GitHub release
+        if: steps.release_check.outputs.skip != 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.upstream.outputs.release_tag }}
+          name: ${{ steps.release_meta.outputs.release_name }}
+          body_path: ${{ steps.release_meta.outputs.notes_file }}
+          files: dist/*.apk
+          generate_release_notes: false
