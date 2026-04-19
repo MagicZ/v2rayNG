@@ -65,6 +65,8 @@ jobs:
           git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
           git fetch --depth=1 upstream master
           git checkout --detach FETCH_HEAD
+          git submodule sync --recursive
+          git submodule update --init --recursive
           cp -R /tmp/fork-custom/branding ./branding
           cp -R /tmp/fork-custom/scripts ./scripts
 
