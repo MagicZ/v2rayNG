@@ -70,12 +70,73 @@ jobs:
           cp -R /tmp/fork-custom/branding ./branding
           cp -R /tmp/fork-custom/scripts ./scripts
 
-      - name: Set up JDK 17
+      - name: Setup Android SDK
+        if: steps.release_check.outputs.skip != 'true'
+        uses: android-actions/setup-android@v4.0.1
+        with:
+          log-accepted-android-sdk-licenses: false
+          cmdline-tools-version: "13114758"
+          packages: "platforms;android-36.1 build-tools;36.1.0 platform-tools"
+
+      - name: Install NDK
+        if: steps.release_check.outputs.skip != 'true'
+        run: |
+          echo "y" | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            --channel=0 \
+            --install "ndk;28.2.13676358"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/28.2.13676358" >> "$GITHUB_ENV"
+          sed -i '10i\
+          \
+              ndkVersion = "28.2.13676358"' V2rayNG/app/build.gradle.kts
+
+      - name: Restore cached libhevtun
+        if: steps.release_check.outputs.skip != 'true'
+        id: cache-libhevtun-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ github.workspace }}/libs
+          key: libhevtun-${{ runner.os }}-${{ env.NDK_HOME }}-${{ hashFiles('.git/modules/hev-socks5-tunnel/HEAD') }}-${{ hashFiles('compile-hevtun.sh') }}
+
+      - name: Build libhevtun
+        if: steps.release_check.outputs.skip != 'true' && steps.cache-libhevtun-restore.outputs.cache-hit != 'true'
+        run: |
+          bash compile-hevtun.sh
+
+      - name: Save libhevtun
+        if: steps.release_check.outputs.skip != 'true' && steps.cache-libhevtun-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ github.workspace }}/libs
+          key: libhevtun-${{ runner.os }}-${{ env.NDK_HOME }}-${{ hashFiles('.git/modules/hev-socks5-tunnel/HEAD') }}-${{ hashFiles('compile-hevtun.sh') }}
+
+      - name: Copy libhevtun
+        if: steps.release_check.outputs.skip != 'true'
+        run: |
+          cp -r "${{ github.workspace }}/libs" "${{ github.workspace }}/V2rayNG/app"
+
+      - name: Fetch AndroidLibXrayLite tag
+        if: steps.release_check.outputs.skip != 'true'
+        run: |
+          pushd AndroidLibXrayLite
+          current_tag="$(git describe --tags --abbrev=0)"
+          echo "CURRENT_TAG=$current_tag" >> "$GITHUB_ENV"
+          popd
+
+      - name: Download libv2ray
+        if: steps.release_check.outputs.skip != 'true'
+        uses: robinraju/release-downloader@v1.12
+        with:
+          repository: "2dust/AndroidLibXrayLite"
+          tag: ${{ env.CURRENT_TAG }}
+          fileName: "libv2ray.aar"
+          out-file-path: V2rayNG/app/libs/
+
+      - name: Set up JDK 21
         if: steps.release_check.outputs.skip != 'true'
         uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: "21"
           cache: gradle
 
       - name: Apply branding
@@ -94,6 +155,7 @@ jobs:
         if: steps.release_check.outputs.skip != 'true'
         working-directory: V2rayNG
         run: |
+          echo "sdk.dir=${ANDROID_HOME}" > local.properties
           chmod +x gradlew
           ./gradlew --no-daemon assemblePlaystoreRelease
 
